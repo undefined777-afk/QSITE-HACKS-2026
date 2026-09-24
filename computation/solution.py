@@ -69,18 +69,16 @@ def proactive_swap(states, upcoming, graph):
             if a in busy or b in busy:
                 yield apply(state, 'SWAP', a, b)
 
-def keep_best(states, upcoming, distance, width=2048, lookahead=20 ):
+def keep_best(states, upcoming, distance, width=2048, lookahead=20, alpha=0.5):
     layout = lambda st: tuple(sorted(st.positions.items()))
     score = lambda st: st.swaps + max(st.clock.values()) / 2
 
-    cheapest = {}
-    for st in sorted(states, key=score):
-        cheapest.setdefault(layout(st), st)
-    pairs = [ga[1:] for ga in upcoming if ga[0] == '2Q'][:lookahead]
+    cheapest = {layout(st): st for st in sorted(states, key=score, reverse=True)}
+    pairs = [ga[1:] for ga in upcoming][:lookahead]
 
     def rank(state):
         where = state.positions
-        future_swaps = sum(distance[where[a]][where[b]] - 1 for a, b in pairs if a in where and b in where)
-        return score(state) + future_swaps * 0.5, layout(state)
+        future = sum(distance[where[a]][where[b]] - 1 for a, b in pairs if a in where and b in where)
+        return score(state) + future * alpha, layout(state)
 
     return heapq.nsmallest(width, cheapest.values(), key=rank)
