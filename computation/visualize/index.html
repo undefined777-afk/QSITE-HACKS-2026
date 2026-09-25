@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Qubit routing by beam search</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#111;--ink:#eee;--mute:#888;--line:#2b2b2b;--pad:#191919;--acc:#64a;color-scheme:dark;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+*,*::before,*::after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 'IBM Plex Sans',system-ui,sans-serif;font-variant-numeric:tabular-nums}
+main{max-width:1120px;margin:0 auto;padding:32px 20px 48px}
+h1{font:600 clamp(28px,4vw,40px)/1.05 'IBM Plex Sans Condensed','Arial Narrow',sans-serif;margin:0 0 24px;letter-spacing:-.01em}
+nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;align-items:center}
+nav small{color:var(--mute);margin-left:6px}
+button{font:inherit;color:var(--mute);background:none;border:1px solid transparent;border-radius:6px;padding:5px 10px;cursor:pointer}
+button:hover{color:var(--ink)}
+button[aria-pressed=true]{color:var(--ink);border-color:var(--line);background:var(--pad)}
+button span{margin-left:6px;opacity:.7}
+button:focus-visible,canvas:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+.stage{display:grid;grid-template-columns:minmax(0,4fr) minmax(0,6fr);gap:40px;align-items:start;margin-top:28px}
+@media (max-width:860px){.stage{grid-template-columns:1fr;gap:24px}}
+#chip{width:100%;max-height:70vh;display:block}
+.cpl{stroke:var(--line);stroke-width:6;stroke-linecap:round}
+.pad{fill:var(--pad);stroke:var(--line)}
+.pid{fill:var(--mute);font-size:10px;text-anchor:middle}
+.tok{transition:transform .35s,opacity .35s}
+@media (prefers-reduced-motion:reduce){.tok{transition:none}}
+.tok circle{fill:var(--ink)}.tok.on circle{fill:var(--acc)}.tok.on text{fill:var(--ink)}
+.tok text{font:600 15px 'IBM Plex Sans Condensed',sans-serif;fill:var(--bg);text-anchor:middle}
+h2{font-size:17px;font-weight:500;margin:0}
+#tc,#ov{width:100%;height:280px;display:block}
+.tree{position:relative;margin-top:16px}
+#ov{position:absolute;inset:0;cursor:pointer}
+.stats{display:flex;gap:32px;margin-top:20px}
+.stats strong{display:block;font:600 28px/1.1 'IBM Plex Sans Condensed','Arial Narrow',sans-serif}
+.stats small{color:var(--mute);font-size:13px}
+.step{display:flex;justify-content:center;align-items:center;gap:6px;color:var(--mute);margin-top:6px}
+.step button{font-size:20px;line-height:1;padding:4px 12px}
+.sched{overflow-x:auto;margin-top:36px;border-top:1px solid var(--line);padding-top:14px}
+#sched{cursor:pointer}
+.g2{fill:var(--line)}.sw{fill:none;stroke:var(--line);stroke-width:1.5}
+.g2.done{fill:var(--mute)}.sw.done{stroke:var(--mute)}.g2.on{fill:var(--acc)}.sw.on{stroke:var(--ink)}
+</style>
+</head>
+<body>
+<main>
+<h1>Qubit routing by beam search</h1>
+<nav id="pick"></nav>
+<nav id="width"></nav>
+<div class="stage">
+ <div>
+  <svg id="chip" viewBox="0 0 420 520" role="img" aria-label="20-qubit chip showing the selected circuit at the current layer"></svg>
+  <div class="step"><button id="lp" aria-label="previous layer">‹</button><span id="lc"></span><button id="ln" aria-label="next layer">›</button></div>
+ </div>
+ <div>
+  <h2 id="head"></h2>
+  <div class="tree"><canvas id="tc"></canvas><canvas id="ov" tabindex="0" aria-label="search tree by gate and rank; click a state to inspect it, arrow keys move to parent, child or neighbour"></canvas></div>
+  <div id="info"></div>
+ </div>
+</div>
+<div class="sched"><svg id="sched"></svg></div>
+</main>
+<script type="module">
+const D = await (await fetch('data.json')).json()
+const $ = s => document.querySelector(s), NS = 'http://www.w3.org/2000/svg'
+const el = (t, at, p) => (e => (Object.entries(at).forEach(([k, v]) => e.setAttribute(k, v)), p?.append(e), e))(document.createElementNS(NS, t))
+const P = n => [60 + D.pos[n][0] * 100, 60 + (4 - D.pos[n][1]) * 100]
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v)), fmt = n => n.toLocaleString('en'), css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim()
+const E = D.edges, PA = D.paths, dist = (a, b) => PA[a][b].length - 1, adj = new Set(E.flatMap(([a, b]) => [a * 20 + b, b * 20 + a]))
+let name = 'dense_random', w = 8, B, S, prog, beams, sel, hov, C, desc = [], TW, TH, dpr
+
+// port of solution.py's candidate generation, same order as python; used to decode states and list children
+const apply = (s, k, a, b, l = 1 + Math.max(s.clk[a], s.clk[b])) => ({...s, clk: s.clk.map((c, i) => i === a || i === b ? l : c), pos: k === 'SWAP' ? swap(s.pos, a, b) : s.pos, sw: s.sw + (k === 'SWAP'), ops: [...s.ops, [k, a, b]]})
+const kids = (s, t) => {
+  const [a, b] = prog[t], need = new Set(prog.slice(t + 1).flat()), nw = [a, b].filter(q => s.pos[q] < 0), free = [...Array(20).keys()].filter(l => !s.pos.includes(l))
+  let ch = nw.length === 2 ? free.flatMap(x => free.filter(y => y !== x).map(y => [x, y])) : nw.length ? free.map(x => [x]) : [[]]
+  const edged = ch.filter(([x, y]) => adj.has(x * 20 + y))
+  if (nw.length === 2 && edged.length) ch = edged
+  return ch.flatMap(locs => {
+    let c = {pos: s.pos.map((p, q) => nw.includes(q) ? locs[nw.indexOf(q)] : p), clk: s.clk, sw: s.sw, ops: [], par: s, t: t + 1}
+    const p = PA[c.pos[a]][c.pos[b]]
+    for (let j = 0; j < p.length - 2; j++) c = apply(c, 'SWAP', p[j], p[j + 1])
+    c = apply(c, '2Q', c.pos[a], c.pos[b])
+    const busy = c.pos.filter((l, q) => l >= 0 && need.has(q))
+    return [[c], ...E.filter(([x, y]) => busy.includes(x) || busy.includes(y)).map(e => [c, e])]
+  })
+}
+const make = ([c, e]) => e ? apply(c, 'SWAP', ...e) : {...c}
+const score = s => s.sw + Math.max(...s.clk) / 2
+const rank = (s, t) => score(s) + prog.slice(t, t + 20).reduce((z, [a, b]) => z + (s.pos[a] >= 0 && s.pos[b] >= 0 ? dist(s.pos[a], s.pos[b]) - 1 : 0), 0) / 2
+const u16 = s => new Uint16Array(Uint8Array.from(atob(s), c => c.charCodeAt(0)).buffer)
+
+// rebuild python's beams from (parent, child ordinal) pairs
+const decode = () => {
+  beams = [[{pos: Array(20).fill(-1), clk: Array(20).fill(0), sw: 0, ops: [], t: 0, k: 0, rank: 0}]]
+  B.runs[w].forEach((st, i) => {
+    const d = u16(st.k), memo = new Map()
+    beams.push(Array.from({length: d.length / 2}, (_, k) => {
+      const par = beams[i][d[2 * k]], c = make((memo.get(par) ?? memo.set(par, kids(par, i)).get(par))[d[2 * k + 1]])
+      return Object.assign(c, {k, ord: d[2 * k + 1], rank: rank(c, i + 1)})
+    }))
+  })
+  for (let t = S; t >= 0; t--) beams[t].forEach(s => (s.last = Math.max(s.last ?? t, t), s.par && (s.par.last = Math.max(s.par.last ?? 0, s.last))))
+  for (let s = beams[S][0]; s; s = s.par) s.win = true
+}
+
+const chip = $('#chip')
+E.forEach(([a, b]) => el('line', {x1: P(a)[0], y1: P(a)[1], x2: P(b)[0], y2: P(b)[1], class: 'cpl'}, chip))
+Object.keys(D.pos).forEach(n => (([x, y]) => (el('rect', {x: x - 26, y: y - 26, width: 52, height: 52, rx: 9, class: 'pad'}, chip), el('text', {x: x + 17, y: y + 22, class: 'pid'}, chip).textContent = n))(P(n)))
+const hotG = el('g', {}, chip), toks = el('g', {}, chip)
+let tok = {}
+
+// tree: faint lines die out, darker ones reach the final beam, accent is the winner
+const tc = $('#tc'), ov = $('#ov'), g0 = tc.getContext('2d'), g1 = ov.getContext('2d')
+const X = t => 10 + t * (TW - 20) / S, Y = k => 8 + (k + .5) * (TH - 16) / w, R = () => clamp((TH - 16) / w / 3, .8, 3)
+const seg = (g, s) => (g.moveTo(X(s.t - 1), Y(s.par.k)), g.lineTo(X(s.t), Y(s.k)))
+const pass = (g, col, a, lw, list, dots) => (g.strokeStyle = g.fillStyle = css(col), g.globalAlpha = a, g.lineWidth = lw, g.beginPath(), list.forEach(s => (seg(g, s), dots && g.rect(X(s.t) - dots, Y(s.k) - dots, 2 * dots, 2 * dots))), g.stroke(), g.fill(), g.globalAlpha = 1)
+const dot = (g, s, col, r) => (g.fillStyle = css(col), g.beginPath(), g.arc(X(s.t), Y(s.k), r, 0, 7), g.fill())
+const drawTree = () => {
+  const all = beams.slice(1).flat(), r = R()
+  g0.setTransform(dpr, 0, 0, dpr, 0, 0), g0.clearRect(0, 0, TW, TH)
+  pass(g0, '--line', 1, .7, all.filter(s => s.last < S), r)
+  pass(g0, '--mute', .6, .7, all.filter(s => s.last === S), r)
+  pass(g0, '--acc', 1, 2.5, all.filter(s => s.win), 0)
+}
+const drawOverlay = () => {
+  g1.setTransform(dpr, 0, 0, dpr, 0, 0), g1.clearRect(0, 0, TW, TH)
+  pass(g1, '--ink', .2, .8, desc, 0)
+  const chain = []
+  for (let a = sel; a.par; a = a.par) chain.push(a)
+  pass(g1, '--ink', 1, 2, chain.filter(s => !s.win), 0)
+  dot(g1, sel, '--ink', 4.5), hov && dot(g1, hov, '--mute', 3.5)
+}
+const size = () => {
+  const r = tc.getBoundingClientRect()
+  dpr = devicePixelRatio || 1, TW = r.width, TH = r.height
+  for (const c of [tc, ov]) c.width = TW * dpr, c.height = TH * dpr
+  B && (drawTree(), drawOverlay())
+}
+
+const load = () => {
+  B = D.bench[name], S = B.prog.length, prog = B.prog
+  document.querySelectorAll('nav button').forEach(b => b.setAttribute('aria-pressed', b.dataset.n === name || +b.dataset.w === w))
+  document.querySelectorAll('#pick button').forEach(b => b.querySelector('span').textContent = D.bench[b.dataset.n].scores[w])
+  decode()
+  toks.replaceChildren()
+  tok = Object.fromEntries([...new Set(prog.flat())].map(q => (g => (el('circle', {r: 18}, g), el('text', {dy: '.35em'}, g).textContent = q, [q, g]))(el('g', {class: 'tok'}, toks))))
+  drawTree(), select(beams[S][0])
+}
+
+const next = s => beams[s.t + 1]?.find(n => n.par === s)
+const stat = (v, l) => `<div><strong>${v}</strong><small>${l}</small></div>`
+const swap = (p, a, b) => p.map(x => x === a ? b : x === b ? a : x)
+
+// the selected state's circuit, scheduled into layers; lays[l] is the layout after layer l
+const select = s => {
+  const seen = new Set([s]), chain = [], clk = {}
+  sel = s, desc = beams.slice(s.t + 1).flat().filter(n => seen.has(n.par) && seen.add(n))
+  for (let a = s; a.par; a = a.par) chain.unshift(a)
+  const route = chain.flatMap(c => c.ops), layers = route.map(([k, a, b]) => clk[a] = clk[b] = 1 + Math.max(clk[a] ?? 0, clk[b] ?? 0))
+  C = {route, layers, depth: Math.max(0, ...layers), lays: [[...route].reverse().reduce((p, [k, a, b]) => k === 'SWAP' ? swap(p, a, b) : p, s.pos)]}
+  for (let l = 1; l <= C.depth; l++) C.lays.push(route.filter((_, i) => layers[i] === l).reduce((p, [k, a, b]) => k === 'SWAP' ? swap(p, a, b) : p, C.lays[l - 1]))
+  const svg = $('#sched'), rows = {}, row = l => (rows[l] = (rows[l] ?? -1) + 1) * 18 + 14
+  svg.replaceChildren()
+  C.ops = route.map(([k], i) => (l => el(k === 'SWAP' ? 'rect' : 'circle', k === 'SWAP'
+    ? {x: -5, y: -5, width: 10, height: 10, transform: `translate(${l * 26 - 5} ${row(l)}) rotate(45)`, class: 'sw'}
+    : {cx: l * 26 - 5, cy: row(l), r: 6, class: 'g2'}, svg))(layers[i]))
+  svg.setAttribute('width', C.depth * 26 + 20), svg.setAttribute('height', Math.max(0, ...Object.values(rows)) * 18 + 28)
+  $('#head').textContent = s.t ? `Gate ${s.t} of ${S}, #${s.k + 1} of ${fmt(beams[s.t].length)}` : 'Empty circuit'
+  $('#info').innerHTML = `<div class="stats">${stat(score(s), 'score')}${stat(s.sw, 'swaps')}${stat(C.depth, 'depth')}${stat(s.rank, 'rank')}</div>`
+  drawOverlay(), show(C.depth)
+}
+
+// chip after layer l, with that layer's swaps dashed and gates in the accent
+const show = l => {
+  const L = C.l = clamp(l, 0, C.depth), ops = C.route.filter((_, i) => C.layers[i] === L), lay = C.lays[L], on = ops.filter(o => o[0] === '2Q').flatMap(o => o.slice(1))
+  for (const q in tok) tok[q].style.transform = `translate(${P(Math.max(0, lay[q]))[0]}px, ${P(Math.max(0, lay[q]))[1]}px)`, tok[q].style.opacity = lay[q] >= 0 ? 1 : 0, tok[q].classList.toggle('on', on.includes(lay[q]))
+  hotG.replaceChildren(...ops.map(([k, a, b]) => el('line', {x1: P(a)[0], y1: P(a)[1], x2: P(b)[0], y2: P(b)[1], 'stroke-linecap': 'round', ...(k === 'SWAP' ? {stroke: 'var(--mute)', 'stroke-width': 2.5, 'stroke-dasharray': '2 6'} : {stroke: 'var(--acc)', 'stroke-width': 8, opacity: .6})})))
+  C.ops.forEach((o, i) => (o.classList.toggle('done', C.layers[i] < L), o.classList.toggle('on', C.layers[i] === L)))
+  $('#lc').textContent = `layer ${L} of ${C.depth}`
+}
+$('#lp').onclick = () => show(C.l - 1)
+$('#ln').onclick = () => show(C.l + 1)
+$('#sched').onclick = e => show(Math.round((e.clientX - $('#sched').getBoundingClientRect().left + 5) / 26))
+
+const pick = e => {
+  const r = ov.getBoundingClientRect(), t = clamp(Math.round((e.clientX - r.left - 10) / (TW - 20) * S), 0, S)
+  return beams[t][clamp(Math.floor((e.clientY - r.top - 8) / (TH - 16) * w), 0, beams[t].length - 1)]
+}
+ov.onmousemove = e => (hov = pick(e), drawOverlay())
+ov.onmouseleave = () => (hov = null, drawOverlay())
+ov.onclick = e => select(pick(e))
+Object.entries(D.bench).forEach(([n, b]) => (btn => (btn.dataset.n = n, btn.innerHTML = `${n.replace('_', ' ')}<span></span>`, btn.onclick = () => (name = n, load())))($('#pick').appendChild(document.createElement('button'))))
+$('#width').innerHTML = '<small style="margin:0 4px 0 0">beam</small>'
+;[8, 32, 2048].forEach(n => (btn => (btn.dataset.w = n, btn.textContent = fmt(n), btn.onclick = () => ($('#head').textContent = 'Loading…', setTimeout(() => (w = n, load()), 30))))($('#width').appendChild(document.createElement('button'))))
+addEventListener('keydown', e => {
+  const k = e.key, b = beams[sel.t], go = {ArrowLeft: sel.par, ArrowRight: next(sel), ArrowUp: b[sel.k - 1], ArrowDown: b[sel.k + 1]}[k]
+  if (e.target.tagName !== 'BUTTON' && go) e.preventDefault(), select(go)
+})
+addEventListener('resize', size)
+size(), load()
+</script>
+</body>
+</html>
