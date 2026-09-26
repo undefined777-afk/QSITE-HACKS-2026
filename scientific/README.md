@@ -88,6 +88,8 @@ To simulate real quantum hardware errors, we applied depolarizing noise (`qml.De
 3. **The Ferromagnetic Phase is Resilient:** Simple uniform alignment ($\uparrow\uparrow\uparrow\uparrow$) retains its strong correlation ($C_1 \approx +1.0$) much better at low noise levels ($p = 0.01$) compared to the Antiphase.
 4. **Boundary Smearing:** Noise broadens the sharp white theoretical boundaries into fuzzy transition zones.
 
+Video link: https://www.youtube.com/watch?v=6R7_VO375eI
+
 ---
 
 
